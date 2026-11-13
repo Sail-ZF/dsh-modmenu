@@ -157,10 +157,10 @@ async function scanScripts() {
   return out.sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind.localeCompare(b.kind)))
 }
 
-function listTools(tools) {
+function listTools(tools, scope) {
   if (!tools?.schemas) return { error: 'tools 服务不可用' }
   try {
-    const schemas = tools.schemas() ?? []
+    const schemas = tools.schemas(scope) ?? []
     return schemas
       .map((s) => ({ name: String(s?.name ?? ''), description: String(s?.description ?? '') }))
       .filter((t) => t.name)
@@ -168,6 +168,39 @@ function listTools(tools) {
   } catch (err) {
     return { error: String(err?.message ?? err) }
   }
+}
+
+/** 每个活着的 agent 各取一份视角（scoped 注册的工具只有这里看得到）。 */
+function listScopedTools(tools, agents) {
+  if (!tools?.schemas || !agents?.list) return []
+  const out = []
+  let live = []
+  try {
+    live = agents.list() ?? []
+  } catch {
+    return []
+  }
+  for (const agent of live) {
+    try {
+      const schemas = tools.schemas(agent) ?? []
+      const list = schemas
+        .map((s) => ({ name: String(s?.name ?? ''), description: String(s?.description ?? '') }))
+        .filter((t) => t.name)
+        .sort((a, b) => a.name.localeCompare(b.name))
+      const rawId = String(agent.id ?? '')
+      // id 形如 session-xxxxxxxx，截掉前缀才看得出是哪一个
+      const shortId = rawId.replace(/^session-/, '').slice(0, 8)
+      out.push({
+        id: rawId,
+        label: shortId || rawId,
+        count: list.length,
+        tools: list,
+      })
+    } catch {
+      /* 这个 agent 读不了就跳过，不影响其它 */
+    }
+  }
+  return out
 }
 
 async function listPlugins(pm) {
@@ -264,6 +297,31 @@ async function checkUpdates(pm, names) {
   }
   await Promise.all(Array.from({ length: Math.min(4, Math.max(1, queue.length)) }, worker))
   return out
+}
+
+/** 下一次「每天 04:00」自动检查的时间戳，0 表示没排上。 */
+let nextDailyCheck = 0
+
+/** 最近一次更新检查的结果（启动时、每天 04:00、或手动强制）。 */
+let updateCache = {
+  results: [],
+  candidates: 0,
+  checkedAt: 0,
+  source: 'none',
+  running: false,
+  error: '',
+}
+
+async function refreshUpdates(pm, source) {
+  if (!pm?.listBundles) return
+  updateCache = { ...updateCache, running: true, error: '' }
+  try {
+    const names = updatableNames(await pm.listBundles())
+    const results = await checkUpdates(pm, names)
+    updateCache = { results, candidates: names.length, checkedAt: Date.now(), source, running: false, error: '' }
+  } catch (err) {
+    updateCache = { ...updateCache, running: false, error: String(err?.message ?? err) }
+  }
 }
 
 /** 全部更新的后台任务（同一时间只允许一个）。 */
@@ -395,11 +453,36 @@ async function readBody(request) {
 export function apply(ctx, config = {}) {
   applyConfig(config)
 
-  // 两个可选服务：装上才有，没装时对应分区留空，不影响其它部分
+  // 三个可选服务：装上才有，没装时对应分区留空，不影响其它部分
   let toolsSvc = null
   let pluginManager = null
+  let agentsSvc = null
   ctx.inject(['tools'], (scoped) => { toolsSvc = scoped.tools })
   ctx.inject(['pluginManager'], (scoped) => { pluginManager = scoped.pluginManager })
+  ctx.inject(['agents'], (scoped) => { agentsSvc = scoped.agents })
+
+  ctx.effect(() => {
+    const timers = []
+    // 启动后查一次（等 15 秒，别跟启动抢资源）；之后每天 04:00 查一次
+    timers.push(setTimeout(() => { void refreshUpdates(pluginManager, 'startup') }, 15_000))
+    const armDaily = () => {
+      const now = new Date()
+      const next = new Date(now)
+      next.setHours(4, 0, 0, 0)
+      if (next <= now) next.setDate(next.getDate() + 1)
+      nextDailyCheck = next.getTime()
+      timers.push(setTimeout(() => {
+        void refreshUpdates(pluginManager, 'daily')
+        armDaily()
+      }, Math.max(1_000, next - now)))
+    }
+    armDaily()
+    return () => {
+      for (const t of timers) {
+        try { clearTimeout(t) } catch { /* ignore */ }
+      }
+    }
+  })
 
   ctx.effect(() => {
     const disposers = []
@@ -412,8 +495,13 @@ export function apply(ctx, config = {}) {
           const scripts = await scanScripts()
           return json({
             scripts,
-            tools: listTools(toolsSvc),
+            tools: {
+              global: listTools(toolsSvc),
+              scopes: listScopedTools(toolsSvc, agentsSvc),
+            },
             plugins: await listPlugins(pluginManager),
+            updates: updateCache,
+            nextDailyCheck,
             generatedAt: Date.now(),
           })
         } catch (err) {
@@ -453,13 +541,16 @@ export function apply(ctx, config = {}) {
     disposers.push(ctx.webServer.register({
       kind: 'exact',
       path: `${PREFIX}/updates`,
-      resource: async () => {
+      resource: async (request) => {
         try {
-          const pm = pluginManager
-          if (!pm?.listBundles) return json({ error: 'pluginManager 不可用' }, 500)
-          const names = updatableNames(await pm.listBundles())
-          const results = await checkUpdates(pm, names)
-          return json({ results, checkedAt: Date.now(), candidates: names.length })
+          const force = new URL(request.url).searchParams.get('force') === '1'
+          if (force) {
+            const pm = pluginManager
+            if (!pm?.listBundles) return json({ error: 'pluginManager 不可用' }, 500)
+            await refreshUpdates(pm, 'manual')
+            return json({ ...updateCache })
+          }
+          return json({ ...updateCache })
         } catch (err) {
           return json({ error: String(err?.message ?? err) }, 500)
         }

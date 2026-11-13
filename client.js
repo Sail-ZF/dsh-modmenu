@@ -43,6 +43,8 @@ window.__ModuleLoader__.load({
 .ocean-tab .n { opacity: 0.6; margin-left: 4px; font-size: 11px; }
 .ocean-bulk { font-size: 12px; color: var(--dsw-alias-label-secondary); margin: 0 0 8px; }
 .ocean-note { font-size: 12px; color: var(--dsw-alias-state-warn-primary); margin: 0 0 8px; }
+.ocean-scopes { display: flex; align-items: center; gap: 2px; margin: 0 0 8px; flex-wrap: wrap; }
+.ocean-scopelabel { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-right: 4px; }
 .ocean-tab .upd { color: var(--dsw-alias-state-success-primary); margin-left: 5px; font-size: 11px; font-weight: 600; }
 .ocean-search {
   width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 6px 10px;
@@ -97,14 +99,19 @@ window.__ModuleLoader__.load({
       script: 'var(--dsw-alias-state-warn-primary)',
     }
     const KIND_LABEL = { plugin: '插件', tool: '工具', script: '脚本' }
-    // 页面生命周期内只自动查一次，别每次切面板都打 registry
-    let autoChecked = false
     const TABS = [
       { id: 'all', label: '全部' },
       { id: 'plugin', label: '插件' },
       { id: 'tool', label: '工具' },
       { id: 'script', label: '脚本' },
     ]
+
+    function fmtClock(ms) {
+      if (!ms) return ''
+      const d = new Date(ms)
+      const pad = (x) => String(x).padStart(2, '0')
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
 
     /** 把底层失败原因说成人话。 */
     function whyText(r) {
@@ -123,15 +130,23 @@ window.__ModuleLoader__.load({
       return (n / 1024 / 1024).toFixed(1) + ' MB'
     }
 
-    function fmtTime(ms) {
-      if (!ms) return ''
+    function fmtTime(ms) {      if (!ms) return ''
       const d = new Date(ms)
       const pad = (x) => String(x).padStart(2, '0')
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
     }
 
+    /** 取当前视角的工具列表：global 是全局注册，其它是某个 agent 的视角。 */
+    function toolListFor(data, scope) {
+      const t = data && data.tools
+      if (!t) return []
+      if (!scope || scope === 'global') return Array.isArray(t.global) ? t.global : []
+      const hit = (t.scopes || []).find((s) => s.id === scope)
+      return Array.isArray(hit && hit.tools) ? hit.tools : []
+    }
+
     /** 把三种来源拍成同一种行数据。 */
-    function buildItems(data) {
+    function buildItems(data, scope) {
       const items = []
       const plugins = Array.isArray(data?.plugins) ? data.plugins : []
       for (const p of plugins) {
@@ -144,7 +159,7 @@ window.__ModuleLoader__.load({
           raw: p,
         })
       }
-      const tools = Array.isArray(data?.tools) ? data.tools : []
+      const tools = toolListFor(data, scope)
       for (const t of tools) {
         if (!t?.name) continue
         items.push({
@@ -195,21 +210,43 @@ window.__ModuleLoader__.load({
       const [updJob, setUpdJob] = useState(null)
       const [bulk, setBulk] = useState(null)
       const [updNote, setUpdNote] = useState('')
+      const [scope, setScope] = useState('global')
+      const [lastChecked, setLastChecked] = useState(0)
+
+      const applyUpdateSnapshot = useCallback((snap) => {
+        if (!snap) return
+        const all = Array.isArray(snap.results) ? snap.results : []
+        const map = {}
+        for (const r of all) if (r && r.latest) map[r.name] = r
+        setUpdates(map)
+        setLastChecked(snap.checkedAt || 0)
+        if (!snap.checkedAt) {
+          setUpdNote('更新检查还没跑过（DSH 启动 15 秒后、或每天 04:00 自动查一次）')
+          return
+        }
+        const failed = all.filter((r) => !r.latest && !r.upToDate)
+        if (all.length === 0) setUpdNote('')
+        else if (failed.length === all.length) setUpdNote('检查失败：' + whyText(failed[0]))
+        else if (failed.length) setUpdNote(`${failed.length} 个包查不到版本（${whyText(failed[0])}）`)
+        else setUpdNote('')
+      }, [])
 
       const load = useCallback(async () => {
         setErr('')
         try {
           const res = await fetch('/modmenu/state', { headers: { 'x-modmenu-request': '1' } })
           if (!res.ok) throw new Error('HTTP ' + res.status)
-          setData(await res.json())
+          const next = await res.json()
+          setData(next)
+          applyUpdateSnapshot(next.updates)
         } catch (e) {
           setErr(String(e && e.message ? e.message : e))
         }
-      }, [])
+      }, [applyUpdateSnapshot])
 
       useEffect(() => { load() }, [load])
 
-      const items = useMemo(() => buildItems(data), [data])
+      const items = useMemo(() => buildItems(data, scope), [data, scope])
       const counts = useMemo(() => {
         const c = { all: items.length, plugin: 0, tool: 0, script: 0 }
         for (const it of items) c[it.kind] = (c[it.kind] || 0) + 1
@@ -254,24 +291,16 @@ window.__ModuleLoader__.load({
         setChecking(true)
         setUpdJob(null)
         try {
-          const res = await fetch('/modmenu/updates', { headers: { 'x-modmenu-request': '1' } })
-          const data = await res.json()
-          const map = {}
-          for (const r of data.results || []) if (r && r.latest) map[r.name] = r
-          setUpdates(map)
-          // 「查不到」和「都是最新」要说清，否则断网时看起来一切正常
-          const all = data.results || []
-          const failed = all.filter((r) => !r.latest && !r.upToDate)
-          if (all.length === 0) setUpdNote('')
-          else if (failed.length === all.length) setUpdNote('更新检查失败：' + whyText(failed[0]))
-          else if (failed.length) setUpdNote(`${failed.length} 个包查不到版本（${whyText(failed[0])}）`)
-          else setUpdNote('')
+          const res = await fetch('/modmenu/updates?force=1', { headers: { 'x-modmenu-request': '1' } })
+          const snap = await res.json()
+          if (snap && snap.error) throw new Error(snap.error)
+          applyUpdateSnapshot(snap)
         } catch (e) {
           setErr(String(e && e.message ? e.message : e))
         } finally {
           setChecking(false)
         }
-      }, [])
+      }, [applyUpdateSnapshot])
 
       const doUpdate = useCallback(async (name, version) => {
         setUpdJob({ name, running: true })
@@ -329,12 +358,6 @@ window.__ModuleLoader__.load({
         }
       }, [load])
 
-      useEffect(() => {
-        if (autoChecked) return
-        autoChecked = true
-        checkAll()
-      }, [checkAll])
-
       let bulkLine = null
       if (bulk) {
         if (bulk.running) {
@@ -350,13 +373,32 @@ window.__ModuleLoader__.load({
       }
 
       const updCount = Object.keys(updates).length
+      const scopes = (data && data.tools && data.tools.scopes) || []
+      const globalToolCount = (data && data.tools && Array.isArray(data.tools.global)) ? data.tools.global.length : 0
+
+      const scopeRow = scopes.length
+        ? h('div', { className: 'ocean-scopes' },
+            h('span', { className: 'ocean-scopelabel' }, '工具视角'),
+            h('div', {
+              className: 'ocean-tab', 'data-on': scope === 'global' ? 'true' : 'false',
+              onClick: () => setScope('global'),
+            }, '全局 ', h('span', { className: 'n' }, String(globalToolCount))),
+            scopes.map((s) => h('div', {
+              key: s.id,
+              className: 'ocean-tab',
+              'data-on': scope === s.id ? 'true' : 'false',
+              onClick: () => setScope(s.id),
+            }, s.label, h('span', { className: 'n' }, String(s.count))))
+          )
+        : null
 
       const head = h('div', { className: 'ocean-head' },
         h('div', { className: 'ocean-headrow' },
           h('span', { className: 'ocean-title' }, '模组菜单'),
           h('span', { className: 'ocean-sub' },
             `插件 ${counts.plugin} · 工具 ${counts.tool} · 脚本 ${counts.script}`,
-            updCount ? ` · 可更新 ${updCount}` : ''),
+            updCount ? ` · 可更新 ${updCount}` : '',
+            lastChecked ? ` · 检查于 ${fmtClock(lastChecked)}` : ''),
           h('span', { className: 'ocean-grow' }),
           h('button', {
             className: 'ocean-btn', 'data-kind': 'primary',
@@ -378,6 +420,7 @@ window.__ModuleLoader__.load({
           }, t.label, h('span', { className: 'n' }, String(counts[t.id] ?? 0)),
              t.id === 'plugin' && updCount ? h('span', { className: 'upd' }, '↑' + updCount) : null))
         ),
+        scopeRow,
         bulkLine ? h('div', { className: 'ocean-bulk' }, bulkLine) : null,
         updNote ? h('div', { className: 'ocean-note' }, updNote) : null,
         h('input', {

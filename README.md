@@ -33,10 +33,26 @@ dsh plugin add link:C:/path/to/dsh-modmenu
 | 分类 | 来源 | 能做什么 |
 |---|---|---|
 | 插件 | `pluginManager.listBundles()` | 看版本、来源、启用状态；查更新、单个更新、全部更新 |
-| 工具 | `ctx.tools.schemas()` | 看当前 agent 能调用的工具和说明 |
+| 工具 | `ctx.tools.schemas()` | **双视角**：全局注册 / 某个 agent 的视角，可切换 |
 | 脚本 | 可配置目录（默认 `~/.dsh/patches`、`~/.dsh/tools`） | 看说明、点「检查」/「运行」，输出就地显示 |
 
-打开面板会自动查一次更新（一个页面生命周期只查一次）。
+### 工具的双视角
+
+`tools.schemas()` 不传 scope 时是**全局注册视图**，看不到注册在 agent 作用域里的工具（`read` / `edit` / `grep` / `job_*` 这些都在那里）。所以在面板上：
+
+- **全局**：不带 scope，通常少于 agent 实际可见的数量
+- **`<session 短 id>`**：`schemas(agent)`，也就是那个 agent 真正看到的工具集
+
+切换到某个 agent 视角，数字会和它实际能调用的对齐。
+
+### 更新检查的时机
+
+自动检查只在两个时机跑，打开面板不会触发网络请求：
+
+- **DSH 启动后 15 秒**（等启动稳定）
+- **每天 04:00**（本地时区；错过就等下一次）
+
+结果缓存在内存里，面板打开时直接读缓存，并显示「检查于 MM-DD HH:MM」。想立刻重查，点「检查更新」（走 `?force=1`）。
 
 ## 配置
 
@@ -60,9 +76,10 @@ dsh plugin add link:C:/path/to/dsh-modmenu
 ## 接口
 
 ```
-GET  /modmenu/state                  → { scripts, tools, plugins, generatedAt }
+GET  /modmenu/state                  → { scripts, tools: { global, scopes }, plugins, updates, nextDailyCheck }
 POST /modmenu/run                    → { id, mode: 'check' | 'run' }
-GET  /modmenu/updates                → { results, candidates, checkedAt }
+GET  /modmenu/updates                → 缓存结果（不联网）
+GET  /modmenu/updates?force=1        → 重查一遍再返回
 POST /modmenu/update                 → { name, version }
 POST /modmenu/update-all             → { jobId }（后台跑，立即返回）
 GET  /modmenu/update-all/status      → { job }
