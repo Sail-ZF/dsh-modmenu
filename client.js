@@ -42,7 +42,16 @@ window.__ModuleLoader__.load({
 .ocean-tab[data-on="true"] { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .ocean-tab .n { opacity: 0.6; margin-left: 4px; font-size: 11px; }
 .ocean-bulk { font-size: 12px; color: var(--dsw-alias-label-secondary); margin: 0 0 8px; }
-.ocean-note { font-size: 12px; color: var(--dsw-alias-state-warn-primary); margin: 0 0 8px; }
+.ocean-note {
+  font-size: 12px; color: var(--dsw-alias-state-warn-primary); margin: 0 0 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.ocean-dismiss {
+  background: transparent; border: none; cursor: pointer; padding: 0 4px;
+  color: var(--dsw-alias-label-secondary); font-size: 15px; line-height: 1;
+  border-radius: 4px;
+}
+.ocean-dismiss:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .ocean-scopes { display: flex; align-items: center; gap: 2px; margin: 0 0 8px; flex-wrap: wrap; }
 .ocean-scopelabel { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-right: 4px; }
 .ocean-doc {
@@ -262,6 +271,7 @@ window.__ModuleLoader__.load({
       const [updJob, setUpdJob] = useState(null)
       const [bulk, setBulk] = useState(null)
       const [updNote, setUpdNote] = useState('')
+      const [noteDismissed, setNoteDismissed] = useState(false)
       const [scope, setScope] = useState('global')
       const [lastChecked, setLastChecked] = useState(0)
       const [filter, setFilter] = useState('all')
@@ -277,6 +287,7 @@ window.__ModuleLoader__.load({
         for (const r of all) if (r && r.latest) map[r.name] = r
         setUpdates(map)
         setLastChecked(snap.checkedAt || 0)
+        setNoteDismissed(false) // 新一轮检查结果，黄字重新出现
         if (!snap.checkedAt) {
           setUpdNote('更新检查还没跑过（DSH 启动 15 秒后、或每天 04:00 自动查一次）')
           return
@@ -526,7 +537,15 @@ window.__ModuleLoader__.load({
         scopeRow,
         filterRow,
         bulkLine ? h('div', { className: 'ocean-bulk' }, bulkLine) : null,
-        updNote ? h('div', { className: 'ocean-note' }, updNote) : null,
+        updNote && !noteDismissed ? h('div', { className: 'ocean-note' },
+          h('span', null, updNote),
+          h('button', {
+            className: 'ocean-dismiss',
+            title: '关掉这条提示',
+            'aria-label': '关掉提示',
+            onClick: () => setNoteDismissed(true),
+          }, '×')
+        ) : null,
         h('input', {
           className: 'ocean-search',
           value: q,
