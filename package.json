@@ -1,6 +1,6 @@
 {
   "name": "dsh-modmenu",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH 的模组菜单：插件、工具、脚本，一个面板看完。Mod menu for DeepSeek Harness: plugins, tools and scripts in one panel.",
   "type": "module",
   "license": "MIT",

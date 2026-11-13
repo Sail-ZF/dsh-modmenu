@@ -32,9 +32,11 @@ dsh plugin add link:C:/path/to/dsh-modmenu
 
 | 分类 | 来源 | 能做什么 |
 |---|---|---|
-| 插件 | `pluginManager.listBundles()` | 看版本、来源、启用状态；查更新、单个更新、全部更新 |
+| 插件 | `pluginManager.listBundles()` | 看版本、来源、状态；**说明文档**、**启用/禁用**、查更新、单个更新、全部更新 |
 | 工具 | `ctx.tools.schemas()` | **双视角**：全局注册 / 某个 agent 的视角，可切换 |
-| 脚本 | 可配置目录（默认 `~/.dsh/patches`、`~/.dsh/tools`） | 看说明、点「检查」/「运行」，输出就地显示 |
+| 脚本 | 可配置目录（默认 `~/.dsh/patches`、`~/.dsh/tools`） | 看说明、点「检查」/「运行」（**运行需二次确认**），输出就地显示并保留上次结果 |
+
+顶部还有一排筛选：`全部` / `有更新` / `今天改过`。
 
 ### 工具的双视角
 
@@ -77,7 +79,9 @@ dsh plugin add link:C:/path/to/dsh-modmenu
 
 ```
 GET  /modmenu/state                  → { scripts, tools: { global, scopes }, plugins, updates, nextDailyCheck }
+GET  /modmenu/bundle-detail?name=X   → { name, detail: { kind, text, path, origin } }
 POST /modmenu/run                    → { id, mode: 'check' | 'run' }
+POST /modmenu/plugin-enable          → { name, enabled }
 GET  /modmenu/updates                → 缓存结果（不联网）
 GET  /modmenu/updates?force=1        → 重查一遍再返回
 POST /modmenu/update                 → { name, version }
@@ -97,7 +101,8 @@ GET  /modmenu/update-all/status      → { job }
 
 - **界面文字目前是中文**，没接 DSH 的 locale 服务。要英文界面需要改 `client.js` 里的字面量。
 - 「全部更新」的进度只在内存里，DSH 重启即丢；重启后重新「检查更新」即可。
-- 插件启停不在这里做，仍走原生插件页（同一个 `pluginManager`，那边交互更完整）。
+- 启停插件会触发组合重载，面板自己也可能被卸载重挂——属正常现象。
+- 说明文档按纯文本渲染（去 HTML 标签、保留文字和链接地址），没有完整 Markdown 样式。
 - `listVersions` 在 registry 连接不稳时会 `refused`：插件会自动重试一次，仍失败则在顶部黄字说明原因。
 
 ## 测试

@@ -45,6 +45,12 @@ window.__ModuleLoader__.load({
 .ocean-note { font-size: 12px; color: var(--dsw-alias-state-warn-primary); margin: 0 0 8px; }
 .ocean-scopes { display: flex; align-items: center; gap: 2px; margin: 0 0 8px; flex-wrap: wrap; }
 .ocean-scopelabel { font-size: 11px; color: var(--dsw-alias-label-secondary); margin-right: 4px; }
+.ocean-doc {
+  background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px; padding: 10px 12px; margin: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+  white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto;
+}
 .ocean-tab .upd { color: var(--dsw-alias-state-success-primary); margin-left: 5px; font-size: 11px; font-weight: 600; }
 .ocean-search {
   width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 6px 10px;
@@ -105,6 +111,52 @@ window.__ModuleLoader__.load({
       { id: 'tool', label: '工具' },
       { id: 'script', label: '脚本' },
     ]
+
+    /** 面板内任何组件抛错都被这里挡住，不至于整块空白。 */
+    class Boundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { err: null }
+      }
+      static getDerivedStateFromError(err) {
+        return { err }
+      }
+      render() {
+        if (this.state.err) {
+          return h('div', { className: 'ocean-root' },
+            h('div', { className: 'ocean-empty' },
+              '面板出错了：' + String(this.state.err && this.state.err.message ? this.state.err.message : this.state.err),
+              h('br'),
+              h('span', { style: { fontSize: '11px', opacity: 0.7 } }, '刷新页面可恢复；如果反复出现，把这段贴到 issue 里。')))
+        }
+        return this.props.children
+      }
+    }
+
+    /** 说明文档是 Markdown/HTML 混合，这里做轻量纯化：去标签、留文字。 */
+    function plainify(text) {
+      if (!text) return ''
+      return String(text)
+        .replace(/<script[\s\S]*?<\/script>/gi, '')
+        .replace(/<style[\s\S]*?<\/style>/gi, '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/!\[([^\]]*)\]\([^)]*\)/g, '[图: $1]')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1（$2）')
+        .replace(/^#{1,6}\s*/gm, '')
+        .replace(/\*\*|__|`/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]+$/gm, '')
+        .trim()
+    }
+
+    function isToday(ms) {
+      if (!ms) return false
+      const d = new Date(ms)
+      const n = new Date()
+      return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+    }
 
     function fmtClock(ms) {
       if (!ms) return ''
@@ -212,6 +264,11 @@ window.__ModuleLoader__.load({
       const [updNote, setUpdNote] = useState('')
       const [scope, setScope] = useState('global')
       const [lastChecked, setLastChecked] = useState(0)
+      const [filter, setFilter] = useState('all')
+      const [confirming, setConfirming] = useState('')
+      const [hist, setHist] = useState({})
+      const [doc, setDoc] = useState(null)
+      const [enabledJob, setEnabledJob] = useState(null)
 
       const applyUpdateSnapshot = useCallback((snap) => {
         if (!snap) return
@@ -257,10 +314,12 @@ window.__ModuleLoader__.load({
         const needle = q.trim().toLowerCase()
         return items.filter((it) => {
           if (tab !== 'all' && it.kind !== tab) return false
+          if (filter === 'updates' && !(it.kind === 'plugin' && updates[it.name])) return false
+          if (filter === 'today' && !(it.kind === 'script' && isToday(it.raw.mtime))) return false
           if (!needle) return true
           return (it.name + ' ' + it.sub + ' ' + JSON.stringify(it.raw || {})).toLowerCase().includes(needle)
         })
-      }, [items, tab, q])
+      }, [items, tab, q, filter, updates])
 
       const active = useMemo(() => {
         if (!shown.length) return null
@@ -279,9 +338,13 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({ id: item.raw.id, mode }),
           })
           const out = await res.json()
+          const settled = { ...out, mode, at: Date.now() }
           setJob({ running: false, name: item.name, mode, ...out })
+          setHist((prev) => ({ ...prev, [item.raw.id]: settled }))
         } catch (e) {
-          setJob({ running: false, name: item.name, mode, ok: false, stdout: '', stderr: String(e && e.message ? e.message : e), ms: 0 })
+          const failed = { ok: false, code: -1, stdout: '', stderr: String(e && e.message ? e.message : e), ms: 0, mode, at: Date.now() }
+          setJob({ running: false, name: item.name, mode, ...failed })
+          setHist((prev) => ({ ...prev, [item.raw.id]: failed }))
         } finally {
           setBusy(false)
         }
@@ -322,6 +385,37 @@ window.__ModuleLoader__.load({
           }
         } catch (e) {
           setUpdJob({ name, running: false, ok: false, error: String(e && e.message ? e.message : e) })
+        }
+      }, [load])
+
+      const loadDoc = useCallback(async (name) => {
+        setDoc({ id: name, loading: true, text: '', error: '' })
+        try {
+          const res = await fetch('/modmenu/bundle-detail?name=' + encodeURIComponent(name), {
+            headers: { 'x-modmenu-request': '1' },
+          })
+          const out = await res.json()
+          if (out && out.error) throw new Error(out.error)
+          const d = (out && out.detail) || {}
+          setDoc({ id: name, loading: false, kind: d.kind || '', text: d.text || '', path: d.path || '', error: '' })
+        } catch (e) {
+          setDoc({ id: name, loading: false, text: '', error: String(e && e.message ? e.message : e) })
+        }
+      }, [])
+
+      const toggleEnable = useCallback(async (name, enabled) => {
+        setEnabledJob({ name, running: true })
+        try {
+          const res = await fetch('/modmenu/plugin-enable', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-modmenu-request': '1' },
+            body: JSON.stringify({ name, enabled }),
+          })
+          const out = await res.json()
+          setEnabledJob({ name, running: false, ...out })
+          if (out && out.ok) load()
+        } catch (e) {
+          setEnabledJob({ name, running: false, ok: false, error: String(e && e.message ? e.message : e) })
         }
       }, [load])
 
@@ -392,6 +486,15 @@ window.__ModuleLoader__.load({
           )
         : null
 
+      const filterRow = h('div', { className: 'ocean-scopes' },
+        h('span', { className: 'ocean-scopelabel' }, '筛选'),
+        [['all', '全部'], ['updates', '有更新'], ['today', '今天改过']].map(([k, label]) => h('div', {
+          key: k,
+          className: 'ocean-tab',
+          'data-on': filter === k ? 'true' : 'false',
+          onClick: () => setFilter(k),
+        }, label)))
+
       const head = h('div', { className: 'ocean-head' },
         h('div', { className: 'ocean-headrow' },
           h('span', { className: 'ocean-title' }, '模组菜单'),
@@ -421,6 +524,7 @@ window.__ModuleLoader__.load({
              t.id === 'plugin' && updCount ? h('span', { className: 'upd' }, '↑' + updCount) : null))
         ),
         scopeRow,
+        filterRow,
         bulkLine ? h('div', { className: 'ocean-bulk' }, bulkLine) : null,
         updNote ? h('div', { className: 'ocean-note' }, updNote) : null,
         h('input', {
@@ -468,10 +572,24 @@ window.__ModuleLoader__.load({
             disabled: busy || !s.checkable,
             onClick: () => run(active, 'check'),
           }, '检查'))
+          const needConfirm = confirming === active.id
           actions.push(h('button', {
-            key: 'run', className: 'ocean-btn', disabled: busy,
-            onClick: () => run(active, 'run'),
-          }, '运行'))
+            key: 'run',
+            className: 'ocean-btn',
+            'data-kind': needConfirm ? 'primary' : undefined,
+            disabled: busy,
+            onClick: () => {
+              if (!needConfirm) { setConfirming(active.id); return }
+              setConfirming('')
+              run(active, 'run')
+            },
+          }, needConfirm ? '确认运行？' : '运行'))
+          if (needConfirm) {
+            actions.push(h('button', {
+              key: 'cancelrun', className: 'ocean-btn', disabled: busy,
+              onClick: () => setConfirming(''),
+            }, '取消'))
+          }
         } else if (active.kind === 'plugin') {
           const p = active.raw
           if (p.version) badges.push('v' + p.version)
@@ -490,6 +608,16 @@ window.__ModuleLoader__.load({
             }, running ? '更新中…' : `更新到 v${upd.latest}`))
           }
           desc = p.description || ''
+          const eBusy = enabledJob && enabledJob.running && enabledJob.name === p.name
+          actions.push(h('button', {
+            key: 'doc', className: 'ocean-btn',
+            onClick: () => loadDoc(p.name),
+          }, doc && doc.id === p.name && doc.loading ? '读取中…' : '说明文档'))
+          actions.push(h('button', {
+            key: 'toggle', className: 'ocean-btn',
+            disabled: Boolean(eBusy),
+            onClick: () => toggleEnable(p.name, p.enabled === false),
+          }, eBusy ? '处理中…' : (p.enabled === false ? '启用' : '禁用')))
         } else {
           kv.push(['名称', active.raw.name])
           desc = active.raw.description || ''
@@ -524,6 +652,37 @@ window.__ModuleLoader__.load({
           }, text)
         }
 
+        let docBox = null
+        if (doc && doc.id === active.name) {
+          if (doc.loading) docBox = h('div', { className: 'ocean-out' }, '读取说明文档…')
+          else if (doc.error) docBox = h('div', { className: 'ocean-out', 'data-ok': 'false' }, '读取失败：' + doc.error)
+          else if (!doc.text) docBox = h('div', { className: 'ocean-out' }, '这个包没有说明文档')
+          else docBox = h('pre', { className: 'ocean-doc' }, plainify(doc.text))
+        }
+
+        let enableBox = null
+        if (enabledJob && enabledJob.name === active.name && !enabledJob.running) {
+          enableBox = h('div', {
+            className: 'ocean-out',
+            'data-ok': enabledJob.ok ? 'true' : 'false',
+          }, enabledJob.ok
+            ? `已${enabledJob.changed ? '切换状态' : '处理'}（${enabledJob.application || 'applied'}）${enabledJob.restartReason ? '，需重启：' + enabledJob.restartReason : ''}`
+            : `操作失败：${enabledJob.error || '未知原因'}`)
+        }
+
+        let histBox = null
+        if (active.kind === 'script' && hist[active.id] && !(job && job.name === active.name)) {
+          const last = hist[active.id]
+          const text = [last.stdout, last.stderr].filter(Boolean).join('\n').trim()
+          histBox = h('div', {
+            className: 'ocean-out',
+            'data-ok': last.ok ? 'true' : 'false',
+          }, [
+            `上次${last.mode === 'check' ? '检查' : '运行'} · ${fmtClock(last.at)} · 退出码 ${last.code}`,
+            text || '（没有输出）',
+          ].join('\n'))
+        }
+
         detail = h('div', { className: 'ocean-detail' },
           h('div', { className: 'ocean-dtitle' }, active.name),
           h('div', { className: 'ocean-badges' }, badges.map((b, i) => h('span', { key: i, className: 'ocean-badge' }, b))),
@@ -533,7 +692,10 @@ window.__ModuleLoader__.load({
           ])) : null,
           desc ? h('div', { className: 'ocean-desc' }, desc) : null,
           actions.length ? h('div', { className: 'ocean-actions' }, actions) : null,
+          enableBox,
           updBox,
+          docBox,
+          histBox,
           out
         )
       }
@@ -551,11 +713,11 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const offPanel = ctx.slots.register({
           name: 'main',
-          key: 'ocean',
-        }, OceanPanel)
+          key: 'modmenu',
+        }, (props) => h(Boundary, null, h(OceanPanel, props)))
         const offRow = ctx.slots.register({
           name: 'sidebar.panellist',
-          id: 'ocean',
+          id: 'modmenu',
           order: 2,
           label: () => '模组菜单',
         }, (owner) => h(OceanIcon, { size: (owner && owner.size) || 16 }))

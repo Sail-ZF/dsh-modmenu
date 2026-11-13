@@ -170,6 +170,19 @@ function listTools(tools, scope) {
   }
 }
 
+/** readBundleDetail 的返回形状可能变，这里拍平成 { text, path, origin, kind }。 */
+function normalizeDetail(detail) {
+  if (!detail) return { kind: 'none', text: '', path: '', origin: '' }
+  if (typeof detail === 'string') return { kind: 'document', text: detail, path: '', origin: '' }
+  const kind = String(detail.kind ?? (detail.text || detail.markdown || detail.content ? 'document' : 'none'))
+  return {
+    kind,
+    text: String(detail.text ?? detail.markdown ?? detail.content ?? ''),
+    path: String(detail.path ?? ''),
+    origin: String(detail.origin ?? ''),
+  }
+}
+
 /** 每个活着的 agent 各取一份视角（scoped 注册的工具只有这里看得到）。 */
 function listScopedTools(tools, agents) {
   if (!tools?.schemas || !agents?.list) return []
@@ -636,6 +649,63 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: `${PREFIX}/update-all/status`,
       resource: async () => json({ job: updateAllJob }),
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: `${PREFIX}/bundle-detail`,
+      resource: async (request) => {
+        try {
+          const name = new URL(request.url).searchParams.get('name') || ''
+          const pm = pluginManager
+          if (!pm?.readBundleDetail) return json({ error: 'pluginManager 不可用' }, 500)
+          if (!name) return json({ error: '缺少 name' }, 400)
+          const detail = await pm.readBundleDetail(name, 'zh-CN')
+          return json({ name, detail: normalizeDetail(detail) })
+        } catch (err) {
+          return json({ error: String(err?.message ?? err) }, 500)
+        }
+      },
+    }))
+
+    disposers.push(ctx.webServer.register({
+      kind: 'exact',
+      path: `${PREFIX}/plugin-enable`,
+      handler: async (req, res) => {
+        try {
+          if (req.method !== 'POST') return writeJson(res, { error: '只接受 POST' }, 405)
+          if (req.headers['x-modmenu-request'] !== '1') return writeJson(res, { error: '缺少请求头' }, 403)
+          const pm = pluginManager
+          if (!pm?.setBundleEnabled || !pm?.listBundles) return writeJson(res, { error: 'pluginManager 不可用' }, 500)
+
+          let payload
+          try {
+            payload = JSON.parse((await readBody(req)) || '{}')
+          } catch {
+            return writeJson(res, { error: '请求体不是 JSON' }, 400)
+          }
+          const name = String(payload?.name ?? '')
+          const enabled = Boolean(payload?.enabled)
+          if (!name) return writeJson(res, { error: '缺少 name' }, 400)
+
+          // 只动「已装在 profile 里」的 bundle，避免误碰官方层
+          const hit = (await pm.listBundles()).find(
+            (b) => b?.name === name && b?.installed && b?.availability === 'profile',
+          )
+          if (!hit) return writeJson(res, { error: '这个包不在可管理范围里' }, 403)
+
+          const out = await pm.setBundleEnabled(name, enabled)
+          return writeJson(res, {
+            ok: out?.application !== 'failed',
+            changed: Boolean(out?.changed),
+            application: String(out?.application ?? ''),
+            restartReason: String(out?.restartReason ?? ''),
+            error: out?.error ? String(out.error.code ?? '') : '',
+          })
+        } catch (err) {
+          return writeJson(res, { ok: false, error: String(err?.message ?? err) }, 500)
+        }
+      },
     }))
 
     return () => {
