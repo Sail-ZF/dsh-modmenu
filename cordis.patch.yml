@@ -1,0 +1,11 @@
+# 模组菜单：侧栏面板 + Host 路由，一行插入
+#
+# 想改扫描目录或超时，给这一行加 config（缺省值见 README）：
+#
+#   config:
+#     scanDirs: ['~/.dsh/patches', '~/.dsh/tools']
+#     runTimeoutMs: 60000
+#     checkTimeoutMs: 8000
+- insert:
+    - id: modmenu
+      name: 'dsh-modmenu'
